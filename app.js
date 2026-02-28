@@ -11,6 +11,7 @@ let plantPhaseMap = {};
 let plantPhaseDurationsMap = {};
 let seedImageMap = {};
 let seedNameImageMap = {};
+let landData = [];
 let calculatedRows = [];
 let currentRankTab = 'noFert';
 
@@ -53,14 +54,16 @@ function getCropImage(seedId, name, size = 32) {
 // ========== 初始化 ==========
 async function init() {
     try {
-        const [seedRes, plantRes, mappingRes] = await Promise.all([
+        const [seedRes, plantRes, mappingRes, landRes] = await Promise.all([
             fetch('seed-shop-merged-export.json'),
             fetch('Plant.json'),
             fetch('seed_mapping.json'),
+            fetch('Land.json'),
         ]);
         const seedJson = await seedRes.json();
         const plantJson = await plantRes.json();
         const mappingJson = await mappingRes.json();
+        landData = await landRes.json();
 
         // 构建 seedId -> 图片文件名 映射 + name -> 图片文件名 映射
         seedImageMap = {};
@@ -90,6 +93,14 @@ async function init() {
             }
         }
 
+        // 根据默认等级自动设置土地数
+        updateLandsByLevel();
+
+        // 监听等级输入变化，自动更新土地数
+        const inputLevel = document.getElementById('inputLevel');
+        inputLevel.addEventListener('input', updateLandsByLevel);
+        inputLevel.addEventListener('change', updateLandsByLevel);
+
         // 初始计算
         // calculate();
         renderCatalog();
@@ -110,6 +121,21 @@ function parseGrowPhases(growPhases) {
             return parts.length >= 2 ? (Number(parts[1]) || 0) : 0;
         })
         .filter(sec => sec > 0);
+}
+
+function getLandsByLevel(level) {
+    if (!landData || landData.length === 0) return 6;
+    let count = 0;
+    for (const land of landData) {
+        if ((land.level_need || 0) <= level) count++;
+    }
+    return Math.max(1, count);
+}
+
+function updateLandsByLevel() {
+    const level = Math.max(1, Math.min(100, parseInt(document.getElementById('inputLevel').value) || 1));
+    const lands = getLandsByLevel(level);
+    document.getElementById('inputLands').value = lands;
 }
 
 function formatSec(sec) {
