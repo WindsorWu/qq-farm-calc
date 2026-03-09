@@ -223,7 +223,7 @@ function setRankingModeVisibility(useOrganic) {
 
 function calcOrganicByPhases(phaseDurations, organicReduceSec) {
     if (!Array.isArray(phaseDurations) || phaseDurations.length === 0 || organicReduceSec <= 0) {
-        return { reducedSec: 0, useCount: 0 };
+        return { reducedSec: 0, useCount: 0, remainingBudget: Math.max(0, organicReduceSec || 0) };
     }
 
     let budget = organicReduceSec;
@@ -247,7 +247,34 @@ function calcOrganicByPhases(phaseDurations, organicReduceSec) {
         budget = 0;
     }
 
-    return { reducedSec, useCount };
+    return { reducedSec, useCount, remainingBudget: budget };
+}
+
+function getSeasonPhases(fullPhases, factor, fallbackGrowSec) {
+    if (Array.isArray(fullPhases) && fullPhases.length > 0) {
+        return fullPhases.map(sec => sec * factor).filter(sec => sec > 0);
+    }
+    const scaledGrow = Math.max(1, fallbackGrowSec * factor);
+    return [scaledGrow];
+}
+
+function calcSeasonByMode(seasonPhases, organicBudgetSec = 0) {
+    const totalGrowSec = seasonPhases.reduce((sum, sec) => sum + sec, 0);
+    const normalReduceSec = seasonPhases[0] || 0;
+    const growAfterNormalSec = Math.max(1, totalGrowSec - normalReduceSec);
+    const phasesAfterNormal = seasonPhases.length > 1 ? seasonPhases.slice(1) : [growAfterNormalSec];
+    const organicResult = calcOrganicByPhases(phasesAfterNormal, organicBudgetSec);
+    const growAfterOrganicSec = Math.max(1, growAfterNormalSec - organicResult.reducedSec);
+
+    return {
+        totalGrowSec,
+        normalReduceSec,
+        growAfterNormalSec,
+        growAfterOrganicSec,
+        organicReducedSec: organicResult.reducedSec,
+        organicUseCount: organicResult.useCount,
+        organicRemainingBudgetSec: organicResult.remainingBudget,
+    };
 }
 
 // ========== 核心计算 ==========
@@ -270,21 +297,33 @@ function buildRows(lands, level, organicReduceSec = 0) {
         if (level && requiredLevel > level) continue;
 
         const fullPhases = plantPhaseDurationsMap[seedId] || [];
-        const reduceSec = plantPhaseMap[seedId] || 0;
-        const growTimeFert = Math.max(1, growTimeSec - reduceSec);
+        const harvestCount = seasons >= 2 ? 2 : 1;
 
-        // 普通肥后，按阶段模拟有机肥：每次只清当前阶段，进入下一阶段后需再次施肥
-        const phasesAfterNormal = fullPhases.length > 1 ? fullPhases.slice(1) : [growTimeFert];
-        const organicResult = calcOrganicByPhases(phasesAfterNormal, organicReduceSec);
-        const growTimeOrganic = Math.max(1, growTimeFert - organicResult.reducedSec);
+        const firstSeasonPhases = getSeasonPhases(fullPhases, 1, growTimeSec);
+        const firstSeason = calcSeasonByMode(firstSeasonPhases, organicReduceSec);
 
-        const cycleNoFert = growTimeSec + plantSecNoFert;
-        const cycleFert = growTimeFert + plantSecFert + fertActionSec; // 普通肥 1 次操作
-        const cycleOrganic = growTimeOrganic + plantSecFert + fertActionSec + (organicResult.useCount * fertActionSec);
+        let secondSeason = null;
+        if (harvestCount === 2) {
+            const secondSeasonPhases = getSeasonPhases(fullPhases, 0.5, growTimeSec);
+            secondSeason = calcSeasonByMode(secondSeasonPhases, firstSeason.organicRemainingBudgetSec);
+        }
 
-        const expPerHourNoFert = (lands * exp / cycleNoFert) * 3600;
-        const expPerHourFert = (lands * exp / cycleFert) * 3600;
-        const expPerHourOrganic = (lands * exp / cycleOrganic) * 3600;
+        const totalGrowNoFert = firstSeason.totalGrowSec + (secondSeason ? secondSeason.totalGrowSec : 0);
+        const totalGrowFert = firstSeason.growAfterNormalSec + (secondSeason ? secondSeason.growAfterNormalSec : 0);
+        const totalGrowOrganic = firstSeason.growAfterOrganicSec + (secondSeason ? secondSeason.growAfterOrganicSec : 0);
+        const normalFertUseCount = harvestCount;
+        const organicUseCount = firstSeason.organicUseCount + (secondSeason ? secondSeason.organicUseCount : 0);
+        const organicReduceAppliedSec = firstSeason.organicReducedSec + (secondSeason ? secondSeason.organicReducedSec : 0);
+        const totalExpPerLand = exp * harvestCount;
+        const totalFruitPerLand = (Number(s.fruitCount) || 0) * harvestCount;
+
+        const cycleNoFert = totalGrowNoFert + plantSecNoFert;
+        const cycleFert = totalGrowFert + plantSecFert + (normalFertUseCount * fertActionSec);
+        const cycleOrganic = totalGrowOrganic + plantSecFert + (normalFertUseCount * fertActionSec) + (organicUseCount * fertActionSec);
+
+        const expPerHourNoFert = (lands * totalExpPerLand / cycleNoFert) * 3600;
+        const expPerHourFert = (lands * totalExpPerLand / cycleFert) * 3600;
+        const expPerHourOrganic = (lands * totalExpPerLand / cycleOrganic) * 3600;
         const gainPercent = expPerHourNoFert > 0
             ? ((expPerHourFert - expPerHourNoFert) / expPerHourNoFert) * 100
             : 0;
@@ -298,16 +337,23 @@ function buildRows(lands, level, organicReduceSec = 0) {
             requiredLevel,
             price,
             exp,
+            totalExpPerLand,
             growTimeSec,
-            growTimeStr: s.growTimeStr || formatSec(growTimeSec),
+            growTimeStr: formatSec(totalGrowNoFert),
             seasons,
-            reduceSec,
-            growTimeFert,
-            growTimeFertStr: formatSec(growTimeFert),
-            growTimeOrganic,
-            growTimeOrganicStr: formatSec(growTimeOrganic),
-            organicUseCount: organicResult.useCount,
-            organicReduceAppliedSec: organicResult.reducedSec,
+            harvestCount,
+            fruitCount: Number(s.fruitCount) || 0,
+            totalFruitPerLand,
+            reduceSec: firstSeason.normalReduceSec,
+            growTimeFert: totalGrowFert,
+            growTimeFertStr: formatSec(totalGrowFert),
+            growTimeOrganic: totalGrowOrganic,
+            growTimeOrganicStr: formatSec(totalGrowOrganic),
+            organicUseCount,
+            organicReduceAppliedSec,
+            normalFertUseCount,
+            secondSeasonGrowSec: secondSeason ? secondSeason.totalGrowSec : 0,
+            secondSeasonGrowFertSec: secondSeason ? secondSeason.growAfterNormalSec : 0,
             cycleNoFert,
             cycleFert,
             cycleOrganic,
@@ -410,6 +456,7 @@ function calculate() {
     msg += `⏱️ 种植速度：不施肥 ${NO_FERT_PLANTS_PER_2_SEC}块/2秒，施肥 ${NORMAL_FERT_PLANTS_PER_2_SEC}块/2秒\n`;
     msg += `🏡 整场种完：不施肥 ${plantSecNo}秒，施肥 ${plantSecFert}秒\n`;
     msg += `🧪 肥料效果：减少一个生长阶段；每次施肥每块地增加 100ms 操作间隔\n`;
+    msg += `🌾 多季作物：首季收获后进入次季，次季成熟时间按首季一半计算，经验按两次收获累计\n`;
     if (useOrganic) {
         const organicSupportSec = estimateOrganicSupportSec(bestOrganic, organicReduceSec);
         msg += `🌿 有机肥：额外扣时 ${organicMinutes} 分钟（在普通肥后生效，按阶段重复施肥）\n`;
@@ -425,7 +472,7 @@ function calculate() {
             msg += `\n🧪 施肥最优：${getCropEmoji(bestFert.name)} ${bestFert.name}（${bestFert.expPerHourFert.toFixed(2)} exp/h · ↑${bestFert.gainPercent.toFixed(1)}%）`;
         }
     }
-    msg += `\n⚠️ 多季作物的计算方式暂未确定，结果仅供参考`;
+    msg += `\n📌 多季作物已按两次收获规则纳入计算`;
     showToast(msg);
 }
 
